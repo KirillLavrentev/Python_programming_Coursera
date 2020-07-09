@@ -1,114 +1,59 @@
+import operator
+import re
 import socket
 import time
 
 
 class ClientError(Exception):
-    """Общий класс исключений клиента"""
-    pass
-
-
-class ClientSocketError(ClientError):
-    """Исключение, выбрасываемое клиентом при сетевой ошибке"""
-    pass
-
-
-class ClientProtocolError(ClientError):
-    """Исключение, выбрасываемое клиентом при ошибке протокола"""
     pass
 
 
 class Client:
-    def __init__(self, host, port, timeout=None):
-        # класс инкапсулирует создание сокета
-        # создаем клиентский сокет, запоминаем объект socket.socket в self 
-        self.host = host
-        self.port = port
-        try:
-            self.connection = socket.create_connection((host, port), timeout)
-        except socket.error as err:
-            raise ClientSocketError("error create connection", err)
-
-    def _read(self):
-        """Метод для чтения ответа сервера"""
-        data = b""
-        # накапливаем буфер, пока не встретим "\n\n" в конце команды
-        while not data.endswith(b"\n\n"):
-            try:
-                data += self.connection.recv(1024)
-            except socket.error as err:
-                raise ClientSocketError("error recv data", err)
-
-        # не забываем преобразовывать байты в объекты str для дальнейшей работы
-        decoded_data = data.decode()
-
-        status, payload = decoded_data.split("\n", 1)
-        payload = payload.strip()
-
-        # если получили ошибку - бросаем исключение ClientError
-        if status == "error":
-            raise ClientProtocolError(payload)
-
-        return payload
+    def __init__(self, ip, port, timeout=None):
+        self.connection = socket.create_connection((ip, port), timeout)
 
     def put(self, key, value, timestamp=None):
-        timestamp = timestamp or int(time.time())
-
-        # отправляем запрос команды put
-        try:
-            self.connection.sendall(
-                f"put {key} {value} {timestamp}\n".encode()
-            )
-        except socket.error as err:
-            raise ClientSocketError("error send data", err)
-
-        # разбираем ответ
-        self._read()
+        timestamp = timestamp or str(int(time.time()))
+        request = f'put {key} {value} {timestamp}\n'
+        self.send_request(request)
 
     def get(self, key):
-        # формируем и отправляем запрос команды get
-        try:
-            self.connection.sendall(
-                f"get {key}\n".encode()
-            )
-        except socket.error as err:
-            raise ClientError("error send data", err)
+        request = f'get {key}\n'
+        data = self.send_request(request)
+        return self.parse_data(data)
 
-        # читаем ответ
-        payload = self._read()
+    def send_request(self, request):
+        connection = self.connection
+        connection.sendall(request.encode())
+        respond = connection.recv(4096).decode()
+        
+        if not (respond[0:2] == ('ok')):
+            raise ClientError
+        if not (respond[-2:] == ('\n\n')):
+            raise ClientError
+            
+        if respond == 'error\nwrong command\n\n':
+            raise ClientError
+        return respond[3:-1]
 
-        data = {}
-        if payload == "":
-            return data
-
-        # разбираем ответ для команды get
-        for count,row in enumerate(payload.split("\n")):
-            if ((row != 'ok') and (count == 0)):
-                raise ClientError(row)
-            try:
-                key, value, timestamp = row.split()
-            except:
-                continue
-            #print(key,' ', value,' ', timestamp)
-            if key not in data:
-                data[key] = []
-            data[key].append((int(timestamp), float(value)))
-
-        return data
+    @staticmethod
+    def parse_data(data):
+        if not data:
+            return dict()
+        pattern = r'(\S+)\s(\S+)\s(\S+)\n'
+        result = re.findall(pattern, data)
+        if (len(result) == 0):
+            raise ClientError
+        result_formatted = ((key, float(value), int(timestamp)) for key, value, timestamp in result)
+        result_sorted = sorted(result_formatted, key=operator.itemgetter(2))
+        
+#         print('result_sorted: ',result_sorted)
+#         if (result_sorted == ''):
+#             raise ClientError
+        result_dict = dict()
+        for key, value, timestamp in result_sorted:
+            result_dict.setdefault(key, []).append((timestamp, value))
+        return result_dict
 
     def close(self):
-        try:
-            self.connection.close()
-        except socket.error as err:
-            raise ClientSocketError("error close connection", err)
-
-if __name__ == "__main__":
-    client = Client("127.0.0.1", 8888, timeout=5)
-    client.put("test", 0.5, timestamp=1)
-    client.put("test", 2.0, timestamp=2)
-    client.put("test", 0.5, timestamp=3)
-    client.put("load", 3, timestamp=4)
-    client.put("load", 4, timestamp=5)
-    print(client.get("*"))
-
-    client.close()
-
+        self.connection.close()
